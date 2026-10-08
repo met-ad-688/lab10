@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +16,7 @@ except ImportError:  # pragma: no cover - repo-local fallback
         import research_survey_workbook as workbook
 
 
-DEFAULT_ASSIGNMENT_CODE = "M01_A_emplo"
+DEFAULT_ASSIGNMENT_CODE = "M01_A"
 DEFAULT_OUTPUT_DIR = "research_submissions"
 
 
@@ -46,18 +48,44 @@ def prepare_workbook() -> Path:
     output_dir = research_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    survey, survey_url = workbook.fetch_survey(code)
+    meta = survey.get("meta", {})
+    identity = {
+        "assignment": meta.get("assignment_code", code),
+        "student": meta.get("student_identifier"),
+        "delivery": meta.get("delivery_id"),
+        "sections": survey.get("sections", []),
+    }
+    signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     existing = existing_workbook_path(code, output_dir)
-    if existing:
+    if existing and workbook_matches(existing, signature):
         print(f"Using existing workbook: {existing}")
         return existing
 
-    survey, survey_url = workbook.fetch_survey(code)
     workbook_path = timestamped_workbook_path(code, output_dir)
+    if workbook_path.exists():
+        workbook_path = workbook_path.with_name(f"{workbook_path.stem}_{datetime.now().microsecond:06d}.xlsx")
     workbook.create_workbook(survey, workbook_path, force=False)
+    wb = workbook.load_workbook(workbook_path)
+    sheet = wb.create_sheet("Delivery")
+    sheet.append(["signature", signature])
+    sheet.sheet_state = "hidden"
+    wb.save(workbook_path)
+    wb.close()
     pointer_path(code, output_dir).write_text(str(workbook_path), encoding="utf-8")
+    if existing:
+        print(f"Previous workbook preserved: {existing}. Use the new workbook for your assigned questions.")
     print(f"Created workbook: {workbook_path}")
     print(f"Survey source: {survey_url}")
     return workbook_path
+
+
+def workbook_matches(path, signature):
+    wb = workbook.load_workbook(path, read_only=True)
+    try:
+        return "Delivery" in wb.sheetnames and wb["Delivery"]["B1"].value == signature
+    finally:
+        wb.close()
 
 
 def validate_workbook(workbook_path: str | Path | None = None) -> Path:

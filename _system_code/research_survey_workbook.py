@@ -9,7 +9,7 @@ import socket
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, urlencode
 
 import requests
 from openpyxl import Workbook, load_workbook
@@ -50,14 +50,19 @@ def load_dotenv_file(path=".env"):
 
 
 def api_key_from_env():
-    api_key = os.environ.get("EMPLOYABILITY_API_KEY", "").strip()
+    api_key = (os.environ.get("STUDENT_API_KEY") or os.environ.get("EMPLOYABILITY_API_KEY", "")).strip()
     if api_key:
         return api_key
     return getpass.getpass("Enter your Student API key: ")
 
 
 def base_url_from_env():
-    return os.environ.get("EMPLOYABILITY_API_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    url = os.environ.get("EMPLOYABILITY_API_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    parsed = urlparse(url)
+    local = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if (parsed.scheme != "https" and not local) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Use an HTTPS course API address without credentials or query parameters.")
+    return url
 
 
 def path_prefix_from_env(base_url):
@@ -112,15 +117,21 @@ def survey_url_candidates(base_url, prefix, assignment_code):
     for candidate_base_url in base_url_candidates(base_url):
         for candidate_prefix in [prefix, ""]:
             candidate = build_api_url(candidate_base_url, candidate_prefix, f"api/v1/research-surveys/{assignment_code}")
+            semester = os.getenv("RESEARCH_SEMESTER_CODE", "").strip()
+            if semester:
+                candidate += "?" + urlencode({"semester": semester})
             if candidate not in candidates:
                 candidates.append(candidate)
     return candidates
 
 
-def survey_submit_url_candidates(base_url, prefix, assignment_code):
+def survey_submit_url_candidates(base_url, prefix, assignment_code, semester_code=""):
     candidates = []
     for candidate_base_url in base_url_candidates(base_url):
         candidate = build_api_url(candidate_base_url, prefix, f"api/v1/research-surveys/{assignment_code}/submit")
+        semester = semester_code or os.getenv("RESEARCH_SEMESTER_CODE", "").strip()
+        if semester:
+            candidate += "?" + urlencode({"semester": semester})
         if candidate not in candidates:
             candidates.append(candidate)
     return candidates
@@ -152,7 +163,7 @@ def fetch_survey(assignment_code):
     attempts = []
     for url in survey_url_candidates(base_url, prefix, assignment_code):
         try:
-            response = requests.get(url, headers=headers, timeout=30)
+            response = requests.get(url, headers=headers, timeout=30, allow_redirects=False)
         except requests.exceptions.RequestException as exc:
             attempts.append({"url": url, "error": str(exc)})
             continue
@@ -256,6 +267,7 @@ def create_workbook(survey_payload, workbook_path, *, force=False):
         return False
     workbook_path.parent.mkdir(parents=True, exist_ok=True)
     runtime_context = runtime_report()
+    runtime_context["survey_semester_code"] = survey_payload.get("meta", {}).get("semester_code", "")
 
     wb = Workbook()
     instructions = wb.active
@@ -521,6 +533,7 @@ def validate_workbook(workbook_path, *, assignment_code, notebook_run_id=None, o
         submit_payload["ai_chat_link"] = ai_chat_link
     record = {
         "assignment_code": assignment_code,
+        "semester_code": workbook.get("runtime", {}).get("survey_semester_code", ""),
         "notebook_run_id": notebook_run_id,
         "notebook_version": NOTEBOOK_VERSION,
         "saved_at": datetime.now(timezone.utc).isoformat(),
@@ -546,9 +559,9 @@ def submit_record(record, assignment_code):
     }
     attempts = []
     response = None
-    for submit_url in survey_submit_url_candidates(base_url, prefix, assignment_code):
+    for submit_url in survey_submit_url_candidates(base_url, prefix, assignment_code, record.get("semester_code", "")):
         try:
-            response = requests.post(submit_url, headers=headers, json=record["submitted_payload_without_api_key"], timeout=30)
+            response = requests.post(submit_url, headers=headers, json=record["submitted_payload_without_api_key"], timeout=30, allow_redirects=False)
             break
         except requests.exceptions.RequestException as exc:
             attempts.append({"url": submit_url, "error": str(exc)})

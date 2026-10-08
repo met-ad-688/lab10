@@ -1,2 +1,1 @@
-"""Small student-facing helpers for research survey assignments."""
-
+"""Shared course helpers for data paths and research survey assignments."""

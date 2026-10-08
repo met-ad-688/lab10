@@ -170,3 +170,9 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 lightcast_job_postings.csv
+
+# Private research responses and raw course datasets
+research_submissions/
+Jobs_2026/
+Jobs_2026_US/
+*.parquet
